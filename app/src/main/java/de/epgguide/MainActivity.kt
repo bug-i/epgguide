@@ -49,7 +49,7 @@ import java.util.Locale
 
 private const val HOURS = 24
 private const val STALE_SECONDS = 6 * 3600L
-private const val HISTORY_DAYS = 2
+private const val HISTORY_DAYS = 1
 private val timeFmt = SimpleDateFormat("HH:mm", Locale.GERMANY)
 private val dateFmt = SimpleDateFormat("EE dd.MM.", Locale.GERMANY)
 private val dayHeaderFmt = SimpleDateFormat("EEEE, dd.MM.yyyy", Locale.GERMANY)
@@ -207,7 +207,7 @@ fun App() {
                 channels = withContext(Dispatchers.IO) { receiver.channels(selectedBouquet.ref) }
             }
 
-            val daysToLoad = linkedSetOf(dayStart(-2), dayStart(-1), dayStart(), selectedDay)
+            val daysToLoad = linkedSetOf(dayStart(-1), dayStart(), selectedDay)
             val merged = LinkedHashMap<String, Event>()
             events.forEach { merged["${it.sref}|${it.begin}"] = it }
 
@@ -503,8 +503,14 @@ private fun ChannelOverview(
     }
     val currentIndex = rows.indexOfFirst {
         it is ChannelOverviewItem.Programme && now in it.event.begin until it.event.end
-    }.coerceAtLeast(0)
-    val listState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 1).coerceAtLeast(0))
+    }.let { if (it >= 0) it else 0 }
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(channel.ref, rows.size, currentIndex) {
+        if (rows.isNotEmpty()) {
+            listState.scrollToItem((currentIndex - 1).coerceAtLeast(0))
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onClose,
@@ -690,24 +696,23 @@ private fun EpgGrid(
                                 .draggable(dragState, Orientation.Horizontal)
                                 .clipToBounds()
                         ) {
-                            Row(
+                            Box(
                                 Modifier.width(gridWidthDp.dp).fillMaxHeight()
                                     .graphicsLayer { translationX = -offsetPx }
                             ) {
-                                var cursor = day
                                 bySref[channel.ref].orEmpty()
                                     .filter { it.begin < nextDay(day) && it.end > day }
                                     .sortedBy { it.begin }
                                     .forEach { event ->
                                         val eventStart = maxOf(event.begin, day)
                                         val eventEnd = minOf(event.end, nextDay(day))
-                                        if (eventStart > cursor) {
-                                            Spacer(Modifier.width(((eventStart - cursor) / 60f * dpPerMin).dp))
-                                        }
                                         if (eventEnd > eventStart) {
+                                            val eventOffset = ((eventStart - day) / 60f * dpPerMin).dp
+                                            val eventWidth = ((eventEnd - eventStart) / 60f * dpPerMin).dp
                                             val running = today && now in event.begin until event.end
                                             Column(
-                                                Modifier.width(((eventEnd - eventStart) / 60f * dpPerMin).dp)
+                                                Modifier.offset(x = eventOffset)
+                                                    .width(eventWidth)
                                                     .fillMaxHeight()
                                                     .border(.5.dp, MaterialTheme.colorScheme.outlineVariant)
                                                     .background(
@@ -730,7 +735,6 @@ private fun EpgGrid(
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                                 )
                                             }
-                                            cursor = eventEnd
                                         }
                                     }
                             }
