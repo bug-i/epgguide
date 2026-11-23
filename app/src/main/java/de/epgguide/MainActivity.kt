@@ -165,7 +165,7 @@ class MainActivity:ComponentActivity(){override fun onCreate(savedInstanceState:
 
    suspend fun repairGaps(day: Long) {
     val nowTs = System.currentTimeMillis() / 1000
-    val gaps = merged.values
+    val rawGaps = merged.values
      .filter { it.begin < nextDay(day) && it.end > day }
      .groupBy { it.sref }
      .values
@@ -176,27 +176,46 @@ class MainActivity:ComponentActivity(){override fun onCreate(savedInstanceState:
        if (gapEnd - gapStart > 5 * 60) gapStart to gapEnd else null
       }
      }
-     .distinct()
+
+    // Zeitlich überlappende Lücken mehrerer Sender zusammenfassen. epgmulti liefert das ganze Bouquet,
+    // daher reicht ein Request pro Zeitfenster statt eines Requests pro Sender.
+    val mergedWindows = rawGaps
+     .sortedBy { it.first }
+     .fold(mutableListOf<Pair<Long, Long>>()) { windows, gap ->
+      val last = windows.lastOrNull()
+      if (last != null && gap.first <= last.second + 5 * 60) {
+       windows[windows.lastIndex] = last.first to maxOf(last.second, gap.second)
+      } else {
+       windows += gap
+      }
+      windows
+     }
      .sortedWith(compareBy<Pair<Long, Long>>(
-      { gap ->
+      { window ->
        when {
-        nowTs in gap.first..gap.second -> 0
-        gap.first >= nowTs -> 1
+        nowTs in window.first..window.second -> 0
+        window.first >= nowTs -> 1
         else -> 2
        }
       },
-      { gap -> if (gap.first >= nowTs) gap.first - nowTs else nowTs - gap.second }
+      { window -> if (window.first >= nowTs) window.first - nowTs else nowTs - window.second }
      ))
 
-    for ((gapStart, gapEnd) in gaps.take(6)) {
+    // Alle Zeitfenster sequenziell abarbeiten. Bei Timeout abbrechen; der nächste Hintergrundlauf
+    // beginnt erneut mit der wichtigsten noch offenen Lücke.
+    for ((gapStart, gapEnd) in mergedWindows) {
      try {
       status = "Prüfe EPG-Lücke ${timeFmt.format(Date(gapStart * 1000))} …"
       val fresh = withContext(Dispatchers.IO) {
-       receiver.epg(bouquetRef, maxOf(day, gapStart - 5 * 60), minOf(nextDay(day), gapEnd + 5 * 60))
+       receiver.epg(
+        bouquetRef,
+        maxOf(day, gapStart - 5 * 60),
+        minOf(nextDay(day), gapEnd + 5 * 60)
+       )
       }
       if (fresh.isNotEmpty()) mergeFresh(day, fresh, replaceRange = false)
      } catch (_: Exception) {
-      // Lücke bleibt markiert und wird beim nächsten Hintergrundlauf erneut versucht.
+      break
      }
     }
    }
@@ -372,7 +391,7 @@ private fun EpgGrid(
                                         ) {
                                             Text(
                                                 text = event.title.trim().ifBlank { "Keine Programminfo" },
-                                                modifier = Modifier.fillMaxSize(),
+                                                modifier = Modifier.fillMaxWidth(),
                                                 fontSize = titleSize,
                                                 lineHeight = (titleSize.value * 1.05f).sp,
                                                 maxLines = 3,
