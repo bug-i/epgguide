@@ -91,7 +91,14 @@ class MainActivity:ComponentActivity(){override fun onCreate(savedInstanceState:
         status=if(events.isNotEmpty())"Aktualisiere im Hintergrund …" else "Verbinde …";if(bouquets.isEmpty())bouquets=withContext(Dispatchers.IO){receiver.bouquets()};if(selectedBouquet==null){selectedBouquet=bouquets.firstOrNull()?:error("Keine Bouquets gefunden");bouquet=selectedBouquet};prefs.edit().putString("bref",selectedBouquet.ref).putString("bname",selectedBouquet.name).apply()
         val cached=withContext(Dispatchers.IO){cache.load(host.trim(),selectedBouquet.ref)};cached?.let{if(channels.isEmpty())channels=it.channels;if(events.isEmpty())events=it.events};if(channels.isEmpty()||force){val fresh=withContext(Dispatchers.IO){receiver.channels(selectedBouquet.ref)};if(fresh.isNotEmpty())channels=fresh}
         val merged=LinkedHashMap<String,Event>();events.forEach{merged["${it.sref}|${it.begin}"]=it};val today=dayStart();val yesterday=dayStart(-1);val bref=selectedBouquet.ref
-        fun historyKey(day:Long)="complete_${bref.hashCode()}_$day";fun cacheHasDay(day:Long)=merged.values.any{it.begin<nextDay(day)&&it.end>day}
+        fun historyKey(day: Long): String {
+            return "complete_${bref.hashCode()}_$day"
+        }
+        fun cacheHasDay(day: Long): Boolean {
+            return merged.values.any { event ->
+                event.begin < nextDay(day) && event.end > day
+            }
+        }
         fun persist(){cache.save(host.trim(),bref,System.currentTimeMillis()/1000,merged.values.maxOfOrNull{it.end}?:nextDay(selectedDay),channels,merged.values.toList())}
         fun mergeFresh(fresh:List<Event>){fresh.forEach{merged["${it.sref}|${it.begin}"]=it};events=merged.values.sortedBy{it.begin};persist()}
         suspend fun loadDay(day:Long,includeNow:Boolean=false):Boolean=try{status=if(includeNow)"Lade aktuelles Programm …" else "Lade ${dateFmt.format(Date(day*1000))} …";val fresh=withContext(Dispatchers.IO){val list=receiver.epg(bref,day,nextDay(day));if(includeNow)list+receiver.epgNow(bref) else list};mergeFresh(fresh);loadedDays[day]=true;true}catch(e:Exception){status="Cache angezeigt · Aktualisierung fehlgeschlagen: ${e.message}";false}
