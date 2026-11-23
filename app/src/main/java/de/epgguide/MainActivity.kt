@@ -9,22 +9,28 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -42,13 +48,23 @@ import java.util.Locale
 
 private const val HOURS = 24
 private const val STALE_SECONDS = 6 * 3600L
+private const val HISTORY_DAYS = 2
 private val timeFmt = SimpleDateFormat("HH:mm", Locale.GERMANY)
 private val dateFmt = SimpleDateFormat("EE dd.MM.", Locale.GERMANY)
+private val dayHeaderFmt = SimpleDateFormat("EEEE, dd.MM.yyyy", Locale.GERMANY)
 
 private enum class UiSize { COMPACT, NORMAL, LARGE }
 
 private fun dayStart(offset: Int = 0): Long = Calendar.getInstance().apply {
     add(Calendar.DAY_OF_YEAR, offset)
+    set(Calendar.HOUR_OF_DAY, 0)
+    set(Calendar.MINUTE, 0)
+    set(Calendar.SECOND, 0)
+    set(Calendar.MILLISECOND, 0)
+}.timeInMillis / 1000
+
+private fun startOfDay(timestamp: Long): Long = Calendar.getInstance().apply {
+    timeInMillis = timestamp * 1000
     set(Calendar.HOUR_OF_DAY, 0)
     set(Calendar.MINUTE, 0)
     set(Calendar.SECOND, 0)
@@ -127,6 +143,7 @@ fun App() {
     var events by remember { mutableStateOf<List<Event>>(emptyList()) }
     var selectedDay by remember { mutableLongStateOf(dayStart()) }
     var scrollTarget by remember { mutableLongStateOf(System.currentTimeMillis() / 1000) }
+    var jumpKey by remember { mutableIntStateOf(0) }
     var status by remember { mutableStateOf("") }
     var detail by remember { mutableStateOf<Event?>(null) }
     var dayChannel by remember { mutableStateOf<Channel?>(null) }
@@ -151,18 +168,21 @@ fun App() {
 
     fun requestDay(day: Long) {
         selectedDay = day
-        scrollTarget = day
+        scrollTarget = if (day == dayStart()) System.currentTimeMillis() / 1000 else day
+        jumpKey++
         loadKey++
     }
 
     fun jumpToNow() {
         selectedDay = dayStart()
         scrollTarget = System.currentTimeMillis() / 1000
+        jumpKey++
         loadKey++
     }
 
     fun jumpToPrimeTime() {
         scrollTarget = primeTime(selectedDay)
+        jumpKey++
     }
 
     LaunchedEffect(loadKey, bouquet?.ref) {
@@ -186,28 +206,33 @@ fun App() {
                 channels = withContext(Dispatchers.IO) { receiver.channels(selectedBouquet.ref) }
             }
 
-            val day = selectedDay
-            val stale = cached == null || System.currentTimeMillis() / 1000 - cached.ts > STALE_SECONDS
-            if (force || loadedDays[day] != true || (stale && day == dayStart())) {
-                status = "Aktualisiere ${dateFmt.format(Date(day * 1000))} …"
-                val fresh = withContext(Dispatchers.IO) {
-                    val list = receiver.epg(selectedBouquet.ref, day, nextDay(day))
-                    if (day == dayStart()) list + receiver.epgNow(selectedBouquet.ref) else list
+            val daysToLoad = linkedSetOf(dayStart(-2), dayStart(-1), dayStart(), selectedDay)
+            val merged = LinkedHashMap<String, Event>()
+            events.forEach { merged["${it.sref}|${it.begin}"] = it }
+
+            for (day in daysToLoad) {
+                val staleToday = day == dayStart() &&
+                    (cached == null || System.currentTimeMillis() / 1000 - cached.ts > STALE_SECONDS)
+                if (force || loadedDays[day] != true || staleToday) {
+                    status = "Aktualisiere ${dateFmt.format(Date(day * 1000))} …"
+                    val fresh = withContext(Dispatchers.IO) {
+                        val list = receiver.epg(selectedBouquet.ref, day, nextDay(day))
+                        if (day == dayStart()) list + receiver.epgNow(selectedBouquet.ref) else list
+                    }
+                    fresh.forEach { merged["${it.sref}|${it.begin}"] = it }
+                    loadedDays[day] = true
+                    events = merged.values.toList()
                 }
-                val merged = LinkedHashMap<String, Event>()
-                events.forEach { merged["${it.sref}|${it.begin}"] = it }
-                fresh.forEach { merged["${it.sref}|${it.begin}"] = it }
-                events = merged.values.toList()
-                loadedDays[day] = true
-                cache.save(
-                    host.trim(),
-                    selectedBouquet.ref,
-                    System.currentTimeMillis() / 1000,
-                    merged.values.maxOfOrNull { it.end } ?: nextDay(day),
-                    channels,
-                    events
-                )
             }
+
+            cache.save(
+                host.trim(),
+                selectedBouquet.ref,
+                System.currentTimeMillis() / 1000,
+                merged.values.maxOfOrNull { it.end } ?: nextDay(selectedDay),
+                channels,
+                merged.values.toList()
+            )
             force = false
             status = ""
         } catch (e: Exception) {
@@ -253,7 +278,7 @@ fun App() {
             TextButton(onClick = { showSearch = true }) { Text("🔍") }
             TextButton(onClick = {
                 force = true
-                loadedDays.remove(selectedDay)
+                loadedDays.clear()
                 loadKey++
             }) { Text("↻") }
             TextButton(onClick = { showSettings = true }) { Text("⚙") }
@@ -264,12 +289,20 @@ fun App() {
             verticalAlignment = Alignment.CenterVertically
         ) {
             TextButton(onClick = { requestDay(moveDay(selectedDay, -1)) }) { Text("◀") }
-            for (offset in 0..6) {
+            for (offset in -HISTORY_DAYS..6) {
                 val day = dayStart(offset)
                 FilterChip(
                     selected = selectedDay == day,
                     onClick = { requestDay(day) },
-                    label = { Text(if (offset == 0) "Heute" else dateFmt.format(Date(day * 1000))) },
+                    label = {
+                        Text(
+                            when (offset) {
+                                0 -> "Heute"
+                                -1 -> "Gestern"
+                                else -> dateFmt.format(Date(day * 1000))
+                            }
+                        )
+                    },
                     modifier = Modifier.padding(horizontal = 2.dp)
                 )
             }
@@ -291,6 +324,7 @@ fun App() {
             bySref = bySref,
             day = selectedDay,
             scrollTarget = scrollTarget,
+            jumpKey = jumpKey,
             receiver = receiver,
             size = uiSize,
             rowHeight = rowHeight,
@@ -310,7 +344,8 @@ fun App() {
             title = { Text(event.title) },
             text = {
                 Text(
-                    "${timeFmt.format(Date(event.begin * 1000))}–${timeFmt.format(Date(event.end * 1000))}" +
+                    "${dateFmt.format(Date(event.begin * 1000))}  " +
+                        "${timeFmt.format(Date(event.begin * 1000))}–${timeFmt.format(Date(event.end * 1000))}" +
                         "  ·  $durationMinutes Min.\n\n${event.desc}"
                 )
             }
@@ -318,39 +353,13 @@ fun App() {
     }
 
     dayChannel?.let { channel ->
-        val list = bySref[channel.ref].orEmpty()
-            .filter { it.begin < nextDay(selectedDay) && it.end > selectedDay }
-            .sortedBy { it.begin }
-        AlertDialog(
-            onDismissRequest = { dayChannel = null },
-            confirmButton = { TextButton(onClick = { dayChannel = null }) { Text("Schließen") } },
-            title = { Text("${channel.name} · ${dateFmt.format(Date(selectedDay * 1000))}") },
-            text = {
-                if (list.isEmpty()) {
-                    Text("Keine Programmdaten für diesen Tag.")
-                } else {
-                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 560.dp)) {
-                        items(list, key = { "${it.sref}|${it.begin}" }) { event ->
-                            Column(
-                                Modifier.fillMaxWidth().clickable {
-                                    dayChannel = null
-                                    detail = event
-                                }.padding(8.dp)
-                            ) {
-                                Text(
-                                    "${timeFmt.format(Date(event.begin * 1000))}–${timeFmt.format(Date(event.end * 1000))}",
-                                    color = MaterialTheme.colorScheme.primary,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(event.title)
-                                if (event.desc.isNotBlank()) {
-                                    Text(event.desc, maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = 12.sp)
-                                }
-                            }
-                            HorizontalDivider()
-                        }
-                    }
-                }
+        ChannelOverview(
+            channel = channel,
+            events = bySref[channel.ref].orEmpty().sortedBy { it.begin },
+            onClose = { dayChannel = null },
+            onEvent = {
+                dayChannel = null
+                detail = it
             }
         )
     }
@@ -365,12 +374,7 @@ fun App() {
             title = { Text("Sendung suchen") },
             text = {
                 Column {
-                    OutlinedTextField(
-                        query,
-                        { query = it },
-                        label = { Text("Titel oder Beschreibung") },
-                        singleLine = true
-                    )
+                    OutlinedTextField(query, { query = it }, label = { Text("Titel oder Beschreibung") }, singleLine = true)
                     Spacer(Modifier.height(8.dp))
                     LazyColumn(Modifier.heightIn(max = 480.dp)) {
                         items(results, key = { "${it.sref}|${it.begin}" }) { event ->
@@ -378,14 +382,9 @@ fun App() {
                             Column(
                                 Modifier.fillMaxWidth().clickable {
                                     showSearch = false
-                                    selectedDay = Calendar.getInstance().apply {
-                                        timeInMillis = event.begin * 1000
-                                        set(Calendar.HOUR_OF_DAY, 0)
-                                        set(Calendar.MINUTE, 0)
-                                        set(Calendar.SECOND, 0)
-                                        set(Calendar.MILLISECOND, 0)
-                                    }.timeInMillis / 1000
+                                    selectedDay = startOfDay(event.begin)
                                     scrollTarget = event.begin
+                                    jumpKey++
                                     detail = event
                                     loadKey++
                                 }.padding(8.dp)
@@ -411,12 +410,8 @@ fun App() {
             onDismissRequest = { showSettings = false },
             confirmButton = {
                 TextButton(onClick = {
-                    prefs.edit()
-                        .putString("host", host)
-                        .putString("user", user)
-                        .putString("pass", pass)
-                        .putString("uiSize", uiSize.name)
-                        .apply()
+                    prefs.edit().putString("host", host).putString("user", user).putString("pass", pass)
+                        .putString("uiSize", uiSize.name).apply()
                     channels = emptyList()
                     events = emptyList()
                     loadedDays.clear()
@@ -431,13 +426,8 @@ fun App() {
                 Column {
                     OutlinedTextField(host, { host = it }, label = { Text("Receiver-IP") }, singleLine = true)
                     OutlinedTextField(user, { user = it }, label = { Text("Benutzer") }, singleLine = true)
-                    OutlinedTextField(
-                        pass,
-                        { pass = it },
-                        label = { Text("Passwort") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation()
-                    )
+                    OutlinedTextField(pass, { pass = it }, label = { Text("Passwort") }, singleLine = true,
+                        visualTransformation = PasswordVisualTransformation())
                     Spacer(Modifier.height(8.dp))
                     Box {
                         OutlinedButton(onClick = { bouquetMenu = true }, modifier = Modifier.fillMaxWidth()) {
@@ -445,46 +435,34 @@ fun App() {
                         }
                         DropdownMenu(bouquetMenu, { bouquetMenu = false }) {
                             bouquets.forEach { item ->
-                                DropdownMenuItem(
-                                    text = { Text(item.name) },
-                                    onClick = {
-                                        bouquet = item
-                                        channels = emptyList()
-                                        events = emptyList()
-                                        loadedDays.clear()
-                                        prefs.edit().putString("bref", item.ref).putString("bname", item.name).apply()
-                                        bouquetMenu = false
-                                        force = true
-                                        loadKey++
-                                    }
-                                )
+                                DropdownMenuItem(text = { Text(item.name) }, onClick = {
+                                    bouquet = item
+                                    channels = emptyList()
+                                    events = emptyList()
+                                    loadedDays.clear()
+                                    prefs.edit().putString("bref", item.ref).putString("bname", item.name).apply()
+                                    bouquetMenu = false
+                                    force = true
+                                    loadKey++
+                                })
                             }
                         }
                     }
                     Box {
                         OutlinedButton(onClick = { sizeMenu = true }, modifier = Modifier.fillMaxWidth()) {
-                            Text(
-                                "Darstellung: ${when (uiSize) {
-                                    UiSize.COMPACT -> "Kompakt"
-                                    UiSize.NORMAL -> "Normal"
-                                    UiSize.LARGE -> "Groß"
-                                }}"
-                            )
+                            Text("Darstellung: ${when (uiSize) {
+                                UiSize.COMPACT -> "Kompakt"
+                                UiSize.NORMAL -> "Normal"
+                                UiSize.LARGE -> "Groß"
+                            }}")
                         }
                         DropdownMenu(sizeMenu, { sizeMenu = false }) {
                             UiSize.values().forEach { item ->
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            when (item) {
-                                                UiSize.COMPACT -> "Kompakt"
-                                                UiSize.NORMAL -> "Normal"
-                                                UiSize.LARGE -> "Groß"
-                                            }
-                                        )
-                                    },
-                                    onClick = { uiSize = item; sizeMenu = false }
-                                )
+                                DropdownMenuItem(text = { Text(when (item) {
+                                    UiSize.COMPACT -> "Kompakt"
+                                    UiSize.NORMAL -> "Normal"
+                                    UiSize.LARGE -> "Groß"
+                                }) }, onClick = { uiSize = item; sizeMenu = false })
                             }
                         }
                     }
@@ -494,12 +472,113 @@ fun App() {
     }
 }
 
+private sealed interface ChannelOverviewItem {
+    data class Header(val day: Long) : ChannelOverviewItem
+    data class Programme(val event: Event) : ChannelOverviewItem
+}
+
+@Composable
+private fun ChannelOverview(
+    channel: Channel,
+    events: List<Event>,
+    onClose: () -> Unit,
+    onEvent: (Event) -> Unit
+) {
+    val now = System.currentTimeMillis() / 1000
+    val oldest = dayStart(-HISTORY_DAYS)
+    val filtered = events.filter { it.end > oldest }.sortedBy { it.begin }
+    val rows = remember(filtered) {
+        buildList<ChannelOverviewItem> {
+            var lastDay: Long? = null
+            filtered.forEach { event ->
+                val eventDay = startOfDay(event.begin)
+                if (eventDay != lastDay) {
+                    add(ChannelOverviewItem.Header(eventDay))
+                    lastDay = eventDay
+                }
+                add(ChannelOverviewItem.Programme(event))
+            }
+        }
+    }
+    val currentIndex = rows.indexOfFirst {
+        it is ChannelOverviewItem.Programme && now in it.event.begin until it.event.end
+    }.coerceAtLeast(0)
+    val listState = rememberLazyListState(initialFirstVisibleItemIndex = (currentIndex - 1).coerceAtLeast(0))
+
+    AlertDialog(
+        onDismissRequest = onClose,
+        confirmButton = { TextButton(onClick = onClose) { Text("Schließen") } },
+        title = { Text(channel.name) },
+        text = {
+            if (rows.isEmpty()) {
+                Text("Keine Programmdaten vorhanden.")
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 600.dp)
+                ) {
+                    itemsIndexed(rows, key = { index, item ->
+                        when (item) {
+                            is ChannelOverviewItem.Header -> "header-${item.day}"
+                            is ChannelOverviewItem.Programme -> "event-$index-${item.event.begin}"
+                        }
+                    }) { _, item ->
+                        when (item) {
+                            is ChannelOverviewItem.Header -> Box(
+                                Modifier.fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.secondaryContainer)
+                                    .padding(horizontal = 10.dp, vertical = 7.dp)
+                            ) {
+                                Text(
+                                    dayHeaderFmt.format(Date(item.day * 1000)).uppercase(Locale.GERMANY),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                                )
+                            }
+                            is ChannelOverviewItem.Programme -> {
+                                val event = item.event
+                                val running = now in event.begin until event.end
+                                Column(
+                                    Modifier.fillMaxWidth()
+                                        .background(
+                                            if (running) MaterialTheme.colorScheme.primaryContainer
+                                            else Color.Transparent
+                                        )
+                                        .clickable { onEvent(event) }
+                                        .padding(8.dp)
+                                ) {
+                                    Text(
+                                        "${timeFmt.format(Date(event.begin * 1000))}–${timeFmt.format(Date(event.end * 1000))}",
+                                        color = if (running) MaterialTheme.colorScheme.onPrimaryContainer
+                                        else MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Text(
+                                        event.title,
+                                        fontWeight = if (running) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                    if (event.desc.isNotBlank()) {
+                                        Text(event.desc, maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = 12.sp)
+                                    }
+                                }
+                                HorizontalDivider()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    )
+}
+
 @Composable
 private fun EpgGrid(
     channels: List<Channel>,
     bySref: Map<String, List<Event>>,
     day: Long,
     scrollTarget: Long,
+    jumpKey: Int,
     receiver: Receiver,
     size: UiSize,
     rowHeight: Dp,
@@ -509,30 +588,47 @@ private fun EpgGrid(
     openDay: (Channel) -> Unit,
     openEvent: (Event) -> Unit
 ) {
-    val horizontalScroll = rememberScrollState()
-    val gridWidth = (HOURS * 60 * dpPerMin).dp
+    val density = LocalDensity.current
+    val configuration = LocalConfiguration.current
+    val gridWidthDp = HOURS * 60 * dpPerMin
+    val viewportDp = (configuration.screenWidthDp.dp - logoWidth).coerceAtLeast(1.dp)
+    val maxOffsetPx = with(density) { (gridWidthDp.dp - viewportDp).coerceAtLeast(0.dp).toPx() }
+    var offsetPx by remember(day, dpPerMin) { mutableFloatStateOf(0f) }
+    val dragState = rememberDraggableState { delta ->
+        offsetPx = (offsetPx - delta).coerceIn(0f, maxOffsetPx)
+    }
+
+    LaunchedEffect(scrollTarget, jumpKey, day, dpPerMin, maxOffsetPx) {
+        val targetPositionPx = with(density) {
+            (((scrollTarget - day) / 60f) * dpPerMin).dp.toPx()
+        }
+        val halfViewportPx = with(density) { viewportDp.toPx() / 2f }
+        offsetPx = (targetPositionPx - halfViewportPx).coerceIn(0f, maxOffsetPx)
+    }
+
     val today = day == dayStart()
     val now = System.currentTimeMillis() / 1000
-    val nowOffset = ((now - day) / 60f * dpPerMin).coerceIn(0f, HOURS * 60 * dpPerMin)
-
-    LaunchedEffect(scrollTarget, day, dpPerMin) {
-        // 90 Minuten Kontext links vom Ziel lassen.
-        val target = (((scrollTarget - day) / 60f - 90f) * dpPerMin).toInt().coerceAtLeast(0)
-        horizontalScroll.scrollTo(target)
-    }
+    val nowPositionPx = with(density) { (((now - day) / 60f) * dpPerMin).dp.toPx() }
+    val lineXpx = nowPositionPx - offsetPx
+    val lineVisible = today && lineXpx in 0f..with(density) { viewportDp.toPx() }
 
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().height(34.dp)) {
             Box(
-                Modifier.width(logoWidth).fillMaxHeight()
-                    .background(MaterialTheme.colorScheme.surface)
-                    .zIndex(2f),
+                Modifier.width(logoWidth).fillMaxHeight().background(MaterialTheme.colorScheme.surface),
                 contentAlignment = Alignment.Center
             ) {
                 Text(dateFmt.format(Date(day * 1000)), fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
-            Box(Modifier.weight(1f).fillMaxHeight().horizontalScroll(horizontalScroll)) {
-                Row(Modifier.width(gridWidth).fillMaxHeight()) {
+            Box(
+                Modifier.weight(1f).fillMaxHeight()
+                    .draggable(dragState, Orientation.Horizontal)
+                    .clipToBounds()
+            ) {
+                Row(
+                    Modifier.width(gridWidthDp.dp).fillMaxHeight()
+                        .graphicsLayer { translationX = -offsetPx }
+                ) {
                     for (index in 0 until 48) {
                         Text(
                             timeFmt.format(Date((day + index * 1800L) * 1000)),
@@ -541,10 +637,10 @@ private fun EpgGrid(
                         )
                     }
                 }
-                if (today) {
+                if (lineVisible) {
                     Box(
-                        Modifier.offset(x = nowOffset.dp).width(2.dp).fillMaxHeight()
-                            .background(Color.Red).zIndex(3f)
+                        Modifier.offset { androidx.compose.ui.unit.IntOffset(lineXpx.toInt(), 0) }
+                            .width(2.dp).fillMaxHeight().background(Color.Red)
                     )
                 }
             }
@@ -580,22 +676,23 @@ private fun EpgGrid(
                                 .background(MaterialTheme.colorScheme.surface)
                                 .border(.5.dp, MaterialTheme.colorScheme.outlineVariant)
                                 .clickable { openDay(channel) }
-                                .padding(2.dp)
-                                .zIndex(2f),
+                                .padding(2.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.Center
                         ) {
                             Picon(receiver, channel, size)
-                            Text(
-                                channel.name,
-                                fontSize = 10.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                            Text(channel.name, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
 
-                        Box(Modifier.weight(1f).fillMaxHeight().horizontalScroll(horizontalScroll)) {
-                            Row(Modifier.width(gridWidth).fillMaxHeight()) {
+                        Box(
+                            Modifier.weight(1f).fillMaxHeight()
+                                .draggable(dragState, Orientation.Horizontal)
+                                .clipToBounds()
+                        ) {
+                            Row(
+                                Modifier.width(gridWidthDp.dp).fillMaxHeight()
+                                    .graphicsLayer { translationX = -offsetPx }
+                            ) {
                                 var cursor = day
                                 bySref[channel.ref].orEmpty()
                                     .filter { it.begin < nextDay(day) && it.end > day }
@@ -636,10 +733,10 @@ private fun EpgGrid(
                                         }
                                     }
                             }
-                            if (today) {
+                            if (lineVisible) {
                                 Box(
-                                    Modifier.offset(x = nowOffset.dp).width(2.dp).fillMaxHeight()
-                                        .background(Color.Red).zIndex(3f)
+                                    Modifier.offset { androidx.compose.ui.unit.IntOffset(lineXpx.toInt(), 0) }
+                                        .width(2.dp).fillMaxHeight().background(Color.Red)
                                 )
                             }
                         }
