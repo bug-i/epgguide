@@ -48,6 +48,7 @@ import java.util.Calendar
 import java.util.Date
 import java.util.LinkedHashMap
 import java.util.Locale
+import kotlin.math.max
 
 private const val HOURS = 24
 private const val STALE_SECONDS = 6 * 3600L
@@ -257,3 +258,106 @@ private sealed interface ChannelOverviewItem { data class Header(val day: Long) 
         }
     }
 }
+
+/**
+ * Robuste Titelanzeige für schmale EPG-Blöcke.
+ *
+ * Der Titel wird abhängig von der tatsächlich verfügbaren Breite auf höchstens
+ * drei Zeilen verteilt. Lange Wörter dürfen dabei ebenfalls getrennt werden.
+ * Erst nach der dritten Zeile wird ein Auslassungszeichen angefügt.
+ */
+@Composable
+fun EpgEventTitle(
+    title: String,
+    running: Boolean,
+    titleSize: TextUnit,
+    modifier: Modifier = Modifier
+) {
+    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+        val cleanTitle = title.trim().ifBlank { "Keine Programminfo" }
+
+        // Näherungswert für die Zahl lesbarer Zeichen je Zeile. Mindestens zwei
+        // Zeichen bleiben auch in sehr schmalen Sendungsblöcken sichtbar.
+        val averageCharacterWidthDp = max(5f, titleSize.value * 0.52f)
+        val charactersPerLine = max(2, (maxWidth.value / averageCharacterWidthDp).toInt())
+        val visibleTitle = wrapAndEllipsize(cleanTitle, charactersPerLine, 3)
+
+        Text(
+            text = visibleTitle,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 1.dp),
+            fontSize = titleSize,
+            lineHeight = (titleSize.value * 1.02f).sp,
+            maxLines = 3,
+            softWrap = true,
+            overflow = TextOverflow.Clip,
+            color = if (running) {
+                MaterialTheme.colorScheme.onPrimaryContainer
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+            fontWeight = if (running) FontWeight.Bold else FontWeight.Normal
+        )
+    }
+}
+
+private fun wrapAndEllipsize(
+    text: String,
+    charactersPerLine: Int,
+    maximumLines: Int
+): String {
+    val limit = charactersPerLine.coerceAtLeast(2)
+    val words = text.split(Regex("\\s+")).filter { it.isNotBlank() }
+    if (words.isEmpty()) return "Keine Programminfo"
+
+    val lines = mutableListOf<String>()
+    var current = ""
+    var wordIndex = 0
+    var remainder = ""
+
+    while (lines.size < maximumLines && (wordIndex < words.size || remainder.isNotEmpty())) {
+        var word = if (remainder.isNotEmpty()) remainder.also { remainder = "" } else words[wordIndex++]
+
+        while (word.length > limit && lines.size < maximumLines) {
+            if (current.isNotEmpty()) {
+                lines += current
+                current = ""
+                if (lines.size >= maximumLines) {
+                    remainder = word
+                    break
+                }
+            }
+            lines += word.take(limit)
+            word = word.drop(limit)
+            if (lines.size >= maximumLines) {
+                remainder = word
+                break
+            }
+        }
+
+        if (lines.size >= maximumLines) break
+        if (word.isEmpty()) continue
+
+        val candidate = if (current.isEmpty()) word else "$current $word"
+        if (candidate.length <= limit) {
+            current = candidate
+        } else {
+            if (current.isNotEmpty()) lines += current
+            current = word
+        }
+    }
+
+    if (lines.size < maximumLines && current.isNotEmpty()) lines += current
+
+    val hasMore = remainder.isNotEmpty() || wordIndex < words.size ||
+        lines.joinToString(" ").replace("…", "").length < text.replace(Regex("\\s+"), " ").length
+
+    if (hasMore && lines.isNotEmpty()) {
+        val last = lines.last().take((limit - 1).coerceAtLeast(1)).trimEnd()
+        lines[lines.lastIndex] = "$last…"
+    }
+
+    return lines.take(maximumLines).joinToString("\n")
+}
+
