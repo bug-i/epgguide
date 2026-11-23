@@ -207,6 +207,9 @@ fun App() {
                 channels = withContext(Dispatchers.IO) { receiver.channels(selectedBouquet.ref) }
             }
 
+            val merged = LinkedHashMap<String, Event>()
+            events.forEach { merged["${it.sref}|${it.begin}"] = it }
+
             val today = dayStart()
             val yesterday = dayStart(-1)
             val selectedBouquetRef = selectedBouquet.ref
