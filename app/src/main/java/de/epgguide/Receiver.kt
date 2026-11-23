@@ -8,6 +8,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLEncoder
 import java.util.Locale
@@ -19,10 +20,7 @@ data class Event(val sref: String, val title: String, val desc: String, val begi
 
 class Receiver(host: String, private val user: String, private val pass: String, private val cacheDir: File) {
     private val baseUrl = host.trim().trimEnd('/').let {
-        when {
-            it.startsWith("http://", true) || it.startsWith("https://", true) -> it
-            else -> "http://$it"
-        }
+        if (it.startsWith("http://", true) || it.startsWith("https://", true)) it else "http://$it"
     }
     private val receiverKey = baseUrl.lowercase(Locale.ROOT).hashCode().toString()
 
@@ -35,8 +33,8 @@ class Receiver(host: String, private val user: String, private val pass: String,
 
     private fun open(path: String): HttpURLConnection {
         val connection = URL("$baseUrl$path").openConnection() as HttpURLConnection
-        connection.connectTimeout = 5000
-        connection.readTimeout = 60000
+        connection.connectTimeout = 10_000
+        connection.readTimeout = 90_000
         connection.instanceFollowRedirects = true
         if (user.isNotBlank()) {
             connection.setRequestProperty(
@@ -47,7 +45,7 @@ class Receiver(host: String, private val user: String, private val pass: String,
         return connection
     }
 
-    private fun get(path: String): JSONObject {
+    private fun getOnce(path: String): JSONObject {
         val connection = open(path)
         try {
             val code = connection.responseCode
@@ -56,6 +54,15 @@ class Receiver(host: String, private val user: String, private val pass: String,
             return connection.inputStream.bufferedReader().use { JSONObject(it.readText()) }
         } finally {
             connection.disconnect()
+        }
+    }
+
+    private fun get(path: String, retryOnTimeout: Boolean = false): JSONObject {
+        return try {
+            getOnce(path)
+        } catch (e: SocketTimeoutException) {
+            if (!retryOnTimeout) throw e
+            getOnce(path)
         }
     }
 
@@ -78,14 +85,25 @@ class Receiver(host: String, private val user: String, private val pass: String,
             val title = it.optString("title", "")
             val serviceRef = it.optString("sref", "")
             if (begin <= 0 || duration <= 0 || title.isBlank() || serviceRef.isBlank()) null
-            else Event(serviceRef, title, it.optString("longdesc").ifBlank { it.optString("shortdesc") }, begin, begin + duration)
+            else Event(
+                serviceRef,
+                title,
+                it.optString("longdesc").ifBlank { it.optString("shortdesc") },
+                begin,
+                begin + duration
+            )
         }
 
     fun epg(bouquetRef: String, from: Long, to: Long): List<Event> =
-        parseEvents(get("/api/epgmulti?bRef=${enc(bouquetRef)}&time=$from&endTime=$to").getJSONArray("events"))
+        parseEvents(
+            get(
+                "/api/epgmulti?bRef=${enc(bouquetRef)}&time=$from&endTime=$to",
+                retryOnTimeout = true
+            ).getJSONArray("events")
+        )
 
     fun epgNow(bouquetRef: String): List<Event> =
-        parseEvents(get("/api/epgnow?bRef=${enc(bouquetRef)}").getJSONArray("events"))
+        parseEvents(get("/api/epgnow?bRef=${enc(bouquetRef)}", retryOnTimeout = true).getJSONArray("events"))
 
     private fun normalizeName(name: String): String {
         val normalized = java.text.Normalizer.normalize(
