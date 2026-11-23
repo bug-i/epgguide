@@ -246,7 +246,21 @@ private sealed interface ChannelOverviewItem { data class Header(val day: Long) 
                                 if (end > start) {
                                     val running = today && now in start until end
                                     Box(Modifier.offset(x = ((start - day) / 60f * dpPerMin).dp).width(((end - start) / 60f * dpPerMin).dp).fillMaxHeight().border(.5.dp, MaterialTheme.colorScheme.outlineVariant).background(if (running) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant).clickable { openEvent(e) }.padding(horizontal = 2.dp, vertical = 2.dp), contentAlignment = Alignment.CenterStart) {
-                                        EpgEventTitle(title = e.title, running = running, titleSize = titleSize, modifier = Modifier.fillMaxWidth())
+                                        Text(
+                                            text = epgDisplayTitle(
+                                                title = e.title,
+                                                boxWidthDp = ((end - start) / 60f * dpPerMin),
+                                                fontSizeSp = titleSize.value
+                                            ),
+                                            modifier = Modifier.fillMaxWidth(),
+                                            fontSize = titleSize,
+                                            lineHeight = (titleSize.value * 1.02f).sp,
+                                            maxLines = 3,
+                                            softWrap = false,
+                                            overflow = TextOverflow.Clip,
+                                            color = if (running) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            fontWeight = if (running) FontWeight.Bold else FontWeight.Normal
+                                        )
                                     }
                                 }
                             }
@@ -259,105 +273,29 @@ private sealed interface ChannelOverviewItem { data class Header(val day: Long) 
     }
 }
 
-/**
- * Robuste Titelanzeige für schmale EPG-Blöcke.
- *
- * Der Titel wird abhängig von der tatsächlich verfügbaren Breite auf höchstens
- * drei Zeilen verteilt. Lange Wörter dürfen dabei ebenfalls getrennt werden.
- * Erst nach der dritten Zeile wird ein Auslassungszeichen angefügt.
- */
-@Composable
-fun EpgEventTitle(
-    title: String,
-    running: Boolean,
-    titleSize: TextUnit,
-    modifier: Modifier = Modifier
-) {
-    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
-        val cleanTitle = title.trim().ifBlank { "Keine Programminfo" }
+private fun epgDisplayTitle(title: String, boxWidthDp: Float, fontSizeSp: Float): String {
+    val clean = title.trim().ifBlank { "Keine Programminfo" }
+    // Deliberately conservative estimate so the produced lines really fit in Compose.
+    val charsPerLine = (boxWidthDp / (fontSizeSp * 0.62f).coerceAtLeast(5f)).toInt().coerceAtLeast(1)
+    val maxChars = charsPerLine * 3
+    val clipped = if (clean.length > maxChars) {
+        clean.take((maxChars - 1).coerceAtLeast(1)) + "…"
+    } else clean
 
-        // Näherungswert für die Zahl lesbarer Zeichen je Zeile. Mindestens zwei
-        // Zeichen bleiben auch in sehr schmalen Sendungsblöcken sichtbar.
-        val averageCharacterWidthDp = max(5f, titleSize.value * 0.52f)
-        val charactersPerLine = max(2, (maxWidth.value / averageCharacterWidthDp).toInt())
-        val visibleTitle = wrapAndEllipsize(cleanTitle, charactersPerLine, 3)
-
-        Text(
-            text = visibleTitle,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 1.dp),
-            fontSize = titleSize,
-            lineHeight = (titleSize.value * 1.02f).sp,
-            maxLines = 3,
-            softWrap = true,
-            overflow = TextOverflow.Clip,
-            color = if (running) {
-                MaterialTheme.colorScheme.onPrimaryContainer
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            },
-            fontWeight = if (running) FontWeight.Bold else FontWeight.Normal
-        )
-    }
-}
-
-private fun wrapAndEllipsize(
-    text: String,
-    charactersPerLine: Int,
-    maximumLines: Int
-): String {
-    val limit = charactersPerLine.coerceAtLeast(2)
-    val words = text.split(Regex("\\s+")).filter { it.isNotBlank() }
-    if (words.isEmpty()) return "Keine Programminfo"
-
-    val lines = mutableListOf<String>()
-    var current = ""
-    var wordIndex = 0
-    var remainder = ""
-
-    while (lines.size < maximumLines && (wordIndex < words.size || remainder.isNotEmpty())) {
-        var word = if (remainder.isNotEmpty()) remainder.also { remainder = "" } else words[wordIndex++]
-
-        while (word.length > limit && lines.size < maximumLines) {
-            if (current.isNotEmpty()) {
-                lines += current
-                current = ""
-                if (lines.size >= maximumLines) {
-                    remainder = word
-                    break
-                }
-            }
-            lines += word.take(limit)
-            word = word.drop(limit)
-            if (lines.size >= maximumLines) {
-                remainder = word
-                break
-            }
-        }
-
-        if (lines.size >= maximumLines) break
-        if (word.isEmpty()) continue
-
-        val candidate = if (current.isEmpty()) word else "$current $word"
-        if (candidate.length <= limit) {
-            current = candidate
+    val out = StringBuilder()
+    var column = 0
+    for (ch in clipped) {
+        if (ch == '\n') {
+            out.append(ch)
+            column = 0
         } else {
-            if (current.isNotEmpty()) lines += current
-            current = word
+            if (column >= charsPerLine) {
+                out.append('\n')
+                column = 0
+            }
+            out.append(ch)
+            column++
         }
     }
-
-    if (lines.size < maximumLines && current.isNotEmpty()) lines += current
-
-    val hasMore = remainder.isNotEmpty() || wordIndex < words.size ||
-        lines.joinToString(" ").replace("…", "").length < text.replace(Regex("\\s+"), " ").length
-
-    if (hasMore && lines.isNotEmpty()) {
-        val last = lines.last().take((limit - 1).coerceAtLeast(1)).trimEnd()
-        lines[lines.lastIndex] = "$last…"
-    }
-
-    return lines.take(maximumLines).joinToString("\n")
+    return out.toString()
 }
-
