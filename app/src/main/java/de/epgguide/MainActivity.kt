@@ -207,23 +207,48 @@ fun App() {
                 channels = withContext(Dispatchers.IO) { receiver.channels(selectedBouquet.ref) }
             }
 
-            val daysToLoad = linkedSetOf(dayStart(-1), dayStart(), selectedDay)
-            val merged = LinkedHashMap<String, Event>()
-            events.forEach { merged["${it.sref}|${it.begin}"] = it }
-
-            for (day in daysToLoad) {
-                val staleToday = day == dayStart() &&
-                    (cached == null || System.currentTimeMillis() / 1000 - cached.ts > STALE_SECONDS)
-                if (force || loadedDays[day] != true || staleToday) {
-                    status = "Aktualisiere ${dateFmt.format(Date(day * 1000))} …"
+            val today = dayStart()
+            val yesterday = dayStart(-1)
+            val selectedBouquetRef = selectedBouquet.ref
+            fun historyKey(day: Long) = "complete_${selectedBouquetRef.hashCode()}_$day"
+            fun mergeFresh(fresh: List<Event>) {
+                fresh.forEach { merged["${it.sref}|${it.begin}"] = it }
+                events = merged.values.toList()
+            }
+            suspend fun loadDay(day: Long, includeNow: Boolean = false): Boolean {
+                return try {
+                    status = if (includeNow) "Lade aktuelles Programm …" else "Lade ${dateFmt.format(Date(day * 1000))} …"
                     val fresh = withContext(Dispatchers.IO) {
-                        val list = receiver.epg(selectedBouquet.ref, day, nextDay(day))
-                        if (day == dayStart()) list + receiver.epgNow(selectedBouquet.ref) else list
+                        val list = receiver.epg(selectedBouquetRef, day, nextDay(day))
+                        if (includeNow) list + receiver.epgNow(selectedBouquetRef) else list
                     }
-                    fresh.forEach { merged["${it.sref}|${it.begin}"] = it }
+                    mergeFresh(fresh)
                     loadedDays[day] = true
-                    events = merged.values.toList()
+                    true
+                } catch (e: Exception) {
+                    // Cache bleibt sichtbar. Ein einzelner fehlgeschlagener Tag stoppt den Rest nicht.
+                    status = "Abruf teilweise fehlgeschlagen: ${e.message}"
+                    false
                 }
+            }
+
+            // 1) Zuerst aktuelles Programm + heutiger Tag, damit die App schnell nutzbar ist.
+            val todayStale = cached == null || System.currentTimeMillis() / 1000 - cached.ts > STALE_SECONDS
+            if (force || loadedDays[today] != true || todayStale) {
+                loadDay(today, includeNow = true)
+            }
+
+            // 2) Danach gestern. Ein vollständig geladener vergangener Tag wird dauerhaft nicht erneut angefragt.
+            val yesterdayAlreadyComplete = prefs.getBoolean(historyKey(yesterday), false)
+            if (force || (!yesterdayAlreadyComplete && loadedDays[yesterday] != true)) {
+                if (loadDay(yesterday)) prefs.edit().putBoolean(historyKey(yesterday), true).apply()
+            } else {
+                loadedDays[yesterday] = true
+            }
+
+            // 3) Erst danach ein ausgewählter zukünftiger Tag. Weitere Zukunftstage werden bei Auswahl geladen.
+            if (selectedDay != today && selectedDay != yesterday && (force || loadedDays[selectedDay] != true)) {
+                loadDay(selectedDay)
             }
 
             cache.save(
